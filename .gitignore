@@ -1,0 +1,5 @@
+.idea
+_*
+**/_*
+exec/*/config.toml
+*.exe
