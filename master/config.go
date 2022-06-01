@@ -133,6 +133,7 @@ type Targets struct {
 	TCPv6  []Target
 	ICMP   []Target
 	ICMPv6 []Target
+	Count  int
 }
 
 func aggregateTargets(targets *targetOrList, name string) (t *Targets) {
@@ -217,6 +218,7 @@ func aggregateTargets(targets *targetOrList, name string) (t *Targets) {
 	}
 
 	process(targets, desc, "")
+	t.Count = len(t.ICMP) + len(t.ICMPv6) + len(t.TCP) + len(t.TCPv6)
 	return
 }
 

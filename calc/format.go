@@ -1,18 +1,18 @@
 package calc
 
 import (
+	"bytes"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 )
 
-func writeDuration(b *strings.Builder, d time.Duration) {
+func writeDuration(b *bytes.Buffer, d time.Duration) {
 	f := float64(d) / float64(time.Second)
 	b.WriteString(strconv.FormatFloat(f, 'e', 10, 64))
 }
 
-func Format(b *strings.Builder, dt []time.Duration, count uint64) string {
+func Format(b *bytes.Buffer, dt []time.Duration, count uint64) string {
 	b.WriteString("U:")
 
 	var valid []time.Duration

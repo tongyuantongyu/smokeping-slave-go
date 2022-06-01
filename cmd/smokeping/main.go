@@ -19,9 +19,7 @@ import (
 	"smokeping-slave-go/master"
 	"smokeping-slave-go/send"
 	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -30,12 +28,12 @@ var key = flag.StringP("key", "k", "", "Node key")
 var server = flag.StringP("server", "s", "http://localhost", "Server address")
 var retry = flag.DurationP("retry", "r", 10*time.Second, "Retry interval when request failed")
 var logTo = flag.StringSliceP("log", "l", []string{"-"}, "Log target")
+var buffer = flag.IntP("buffer", "b", 1440, "Metric buffer size count")
 var help = flag.BoolP("help", "h", false, "Print help")
 
 const url = "/smokeping.fcgi"
 
 var cli *http.Client
-var sendResult = make(chan bool)
 var working uint32
 
 var fullVersion string
@@ -104,22 +102,21 @@ func getConfig() *master.Config {
 	return config
 }
 
-func Send(data string) (err error) {
-	defer func() {
-		if err == nil {
-			sendResult <- true
-			return
-		}
+var bodyBuffer bytes.Buffer
 
-		log.Printf("Failed during communication: %s.\n", err)
-		sendResult <- false
+func sendOnce(data []byte) (err error) {
+	bodyBuffer.Reset()
+
+	defer func() {
+		if err != nil {
+			log.Printf("Failed during communication: %s.\n", err)
+		}
 	}()
 
 	hash := hmac.New(md5.New, []byte(*key))
-	hash.Write([]byte(data))
+	hash.Write(data)
 	sign := hex.EncodeToString(hash.Sum(nil))
-	buf := bytes.Buffer{}
-	body := multipart.NewWriter(&buf)
+	body := multipart.NewWriter(&bodyBuffer)
 	err = body.WriteField("slave", *node)
 	if err != nil {
 		return err
@@ -140,7 +137,11 @@ func Send(data string) (err error) {
 		return err
 	}
 
-	err = body.WriteField("data", data)
+	p, err := body.CreateFormField("data")
+	if err != nil {
+		return err
+	}
+	_, err = p.Write(data)
 	if err != nil {
 		return err
 	}
@@ -152,7 +153,7 @@ func Send(data string) (err error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *retry/2)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "POST", *server+url, &buf)
+	req, err := http.NewRequestWithContext(ctx, "POST", *server+url, &bodyBuffer)
 	if err != nil {
 		return err
 	}
@@ -169,16 +170,16 @@ func Send(data string) (err error) {
 		return fmt.Errorf("bad http response: %s", resp.Status)
 	}
 
-	buf = bytes.Buffer{}
-	_, err = io.Copy(&buf, resp.Body)
+	bodyBuffer.Reset()
+	_, err = io.Copy(&bodyBuffer, resp.Body)
 	if err != nil {
 		return err
 	}
 
 	switch resp.Header.Get("Content-Type") {
 	case "text/plain":
-		if buf.String() != "OK\n" {
-			return fmt.Errorf("bad response when sending result: %s", buf.String())
+		if bodyBuffer.String() != "OK\n" {
+			return fmt.Errorf("bad response when sending result: %s", bodyBuffer.String())
 		}
 
 		return nil
@@ -193,13 +194,13 @@ func Send(data string) (err error) {
 	defer configLock.Unlock()
 
 	hash = hmac.New(md5.New, []byte(*key))
-	hash.Write(buf.Bytes())
+	hash.Write(bodyBuffer.Bytes())
 	sign = hex.EncodeToString(hash.Sum(nil))
 	if sign != resp.Header.Get("Key") {
 		return errors.New("bad signature in server response")
 	}
 
-	newConfig, err := master.ParseConfig(buf.Bytes(), *node)
+	newConfig, err := master.ParseConfig(bodyBuffer.Bytes(), *node)
 	if err != nil {
 		return err
 	}
@@ -216,17 +217,59 @@ func Send(data string) (err error) {
 	return nil
 }
 
-func Once(c *master.Config) {
-	type result struct {
-		dt    []time.Duration
-		count uint64
-		id    string
+type result struct {
+	dt    []time.Duration
+	count uint64
+	id    string
+}
+
+type sendData struct {
+	at   string
+	data []result
+}
+
+func formatResult(r sendData, b *bytes.Buffer) []byte {
+	b.Reset()
+	for _, entry := range r.data {
+		b.WriteString(entry.id)
+		b.WriteByte('\t')
+		b.WriteString(r.at)
+		b.WriteByte('\t')
+		calc.Format(b, entry.dt, entry.count)
+		b.WriteByte('\n')
 	}
 
+	return b.Bytes()[:b.Len()-1]
+}
+
+var dataCache = sync.Pool{
+	New: func() any {
+		return []result(nil)
+	},
+}
+
+func sender(data chan sendData) {
+	var b bytes.Buffer
+	for v := range data {
+		payload := formatResult(v, &b)
+		dataCache.Put(v.data[:0])
+		err := sendOnce(payload)
+		if err != nil {
+			ticker := time.NewTicker(*retry)
+			for range ticker.C {
+				if err = sendOnce(payload); err == nil {
+					break
+				}
+			}
+			ticker.Stop()
+		}
+		log.Printf("Metric at %s sent to server.\n", v.at)
+	}
+}
+
+func Once(c *master.Config, deliver chan sendData) {
 	agg := make(chan result)
 	sendDone := sync.WaitGroup{}
-
-	_sendDoneChan := make(chan struct{})
 
 	handle := func(targets []master.Target, send send.Sender, pc *master.ProbeConfig) {
 		ticker := time.NewTicker(c.Step / time.Duration(len(targets)))
@@ -259,85 +302,60 @@ func Once(c *master.Config) {
 
 	go func() {
 		sendDone.Wait()
-		close(_sendDoneChan)
+		close(agg)
 	}()
 
-	go func() {
-		now := strconv.FormatInt(time.Now().Unix(), 10)
-		log.Printf("Start a new round of probing at %s.\n", now)
-		var b strings.Builder
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+	log.Printf("Start a new round of probing at %s.\n", now)
 
-	Collect:
+	data := dataCache.Get().([]result)
+	if cap(data) < c.T.Count {
+		data = make([]result, 0, c.T.Count)
+	}
+
+	for r := range agg {
+		data = append(data, r)
+	}
+
+	if len(data) != 0 {
+	Deliver:
 		for {
 			select {
-			case r := <-agg:
-				b.WriteString(r.id)
-				b.WriteByte('\t')
-				b.WriteString(now)
-				b.WriteByte('\t')
-				calc.Format(&b, r.dt, r.count)
-				b.WriteByte('\n')
-			case <-_sendDoneChan:
-				break Collect
-			}
-		}
+			case deliver <- sendData{
+				data: data,
+				at:   now,
+			}:
+				break Deliver
 
-		if b.Len() == 0 {
-			return
-		}
-
-		//print(b.String())
-
-		//print(b.String())
-
-		err := Send(b.String()[:b.Len()-1])
-		defer func() {
-			if err != nil {
-				log.Printf("Send metric at %s to server failed: %s.\n", now, err)
-			} else {
-				log.Printf("Send metric at %s to server done.\n", now)
-			}
-		}()
-		if err != nil {
-			ticker := time.NewTicker(*retry)
-			defer ticker.Stop()
-			for i := 0; i < 3; i++ {
-				<-ticker.C
-				if err = Send(b.String()[:b.Len()-1]); err == nil {
-					return
+			default:
+				select {
+				case <-deliver:
+				default:
 				}
 			}
 		}
-	}()
+
+	}
 }
 
-func detect() {
-	if atomic.LoadUint32(&working) == 1 {
-		return
-	}
-
+func bootstrap() {
 	ticker := time.NewTicker(*retry)
 	defer ticker.Stop()
 	for ; true; <-ticker.C {
-		if err := Send(""); err == nil {
-			atomic.StoreUint32(&working, 1)
+		if err := sendOnce([]byte("")); err == nil {
 			return
 		}
 	}
 }
 
-func work() {
+func work(deliver chan sendData) {
 	c := getConfig()
 	ticker := time.NewTicker(c.Step)
 	stamp := c.Last
 	defer ticker.Stop()
 
 	for ; true; <-ticker.C {
-		if atomic.LoadUint32(&working) == 0 {
-			return
-		}
-
-		go Once(c)
+		go Once(c, deliver)
 		c = getConfig()
 		if c.Last != stamp {
 			ticker.Reset(c.Step)
@@ -347,23 +365,13 @@ func work() {
 }
 
 func main() {
-	go func() {
-		count := 0
-		for result := range sendResult {
-			if result {
-				count = 0
-				atomic.StoreUint32(&working, 1)
-			} else {
-				count++
-				if count > 5 {
-					atomic.StoreUint32(&working, 0)
-				}
-			}
-		}
-	}()
-
-	for {
-		detect()
-		work()
+	if *buffer <= 0 {
+		log.Fatalf("buffer size must > 0, got %d\n", *buffer)
 	}
+	data := make(chan sendData, *buffer)
+
+	bootstrap()
+
+	go sender(data)
+	work(data)
 }
