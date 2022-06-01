@@ -1,6 +1,7 @@
 package icmp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"golang.org/x/net/icmp"
@@ -29,6 +30,8 @@ type ICMPRequest struct {
 	Deadline fasttime.Time
 	// request issue time
 	IssueTime fasttime.Time
+	// message body sent
+	Data []byte
 	// channel to return result
 	delivery chan *Result
 }
@@ -56,6 +59,16 @@ func (r *ICMPRequest) Deliver(response Response) bool {
 	}
 	ID, TargetIP := response.GetIdentifier()
 	if ID == r.ID && TargetIP.Equal(r.TargetIP) {
+		if data, ok := response.GetVerifier().([]byte); ok {
+			l := len(data)
+			if l > len(r.Data) {
+				l = len(r.Data)
+			}
+			if !bytes.Equal(r.Data[:l], data[:l]) {
+				return false
+			}
+		}
+
 		AddrIP, Received, Code := response.GetInformation()
 		if r.Passed(Received) {
 			r.delivery <- &Result{
@@ -76,16 +89,18 @@ func (r *ICMPRequest) Deliver(response Response) bool {
 
 // An ICMPResponse represents an ICMPResponse (EchoReply, TimeExceed or DstUnreachable)
 type ICMPResponse struct {
+	// response source ip
+	AddrIP net.IP
+	// target ip of the request
+	TargetIP net.IP
+	// received data
+	Data []byte
 	// Seq used to identify request
 	Seq int
 	// extend identify field
 	ID int
-	// response source ip
-	AddrIP net.IP
 	// time passed from request time
 	Received fasttime.Time
-	// target ip of the request
-	TargetIP net.IP
 	// Code of ICMP destination unreachable message response
 	Code int
 }
@@ -96,6 +111,10 @@ func (I *ICMPResponse) GetIdentifier() (int, net.IP) {
 
 func (I *ICMPResponse) GetInformation() (net.IP, fasttime.Time, int) {
 	return I.AddrIP, I.Received, I.Code
+}
+
+func (I *ICMPResponse) GetVerifier() any {
+	return I.Data
 }
 
 // A RawResponse represents an ICMPResponse (TimeExceed or DstUnreachable) of none-ICMP request
@@ -224,6 +243,7 @@ func v4dispatcher(ctx context.Context, data chan *icmpReceived, icmpResponse cha
 					r.TargetIP = r.AddrIP
 					r.ID = body.ID
 					r.Seq = body.Seq
+					r.Data = body.Data
 					icmpResponse <- r
 					return
 				case *icmp.TimeExceeded:
@@ -255,7 +275,7 @@ func v4dispatcher(ctx context.Context, data chan *icmpReceived, icmpResponse cha
 				}
 				r.TargetIP = head.Dst.To16()
 				if head.Protocol == 1 { // iana.ProtocolICMP
-					msgSend, err := icmp.ParseMessage(1, bodyData[20:28]) // iana.ProtocolICMP
+					msgSend, err := icmp.ParseMessage(1, bodyData[20:]) // iana.ProtocolICMP
 					if err != nil {
 						return
 					}
@@ -263,6 +283,7 @@ func v4dispatcher(ctx context.Context, data chan *icmpReceived, icmpResponse cha
 					if sendBody, ok := msgSend.Body.(*icmp.Echo); ok {
 						r.ID = sendBody.ID
 						r.Seq = sendBody.Seq
+						r.Data = sendBody.Data
 						icmpResponse <- r
 					}
 				} else {
@@ -315,6 +336,7 @@ func v6dispatcher(ctx context.Context, data chan *icmpReceived, icmpResponse cha
 					r.TargetIP = r.AddrIP
 					r.ID = body.ID
 					r.Seq = body.Seq
+					r.Data = body.Data
 					icmpResponse <- r
 					return
 				case *icmp.TimeExceeded:
@@ -346,7 +368,7 @@ func v6dispatcher(ctx context.Context, data chan *icmpReceived, icmpResponse cha
 				}
 				r.TargetIP = head.Dst.To16()
 				if head.NextHeader == 58 { // iana.ProtocolIPv6ICMP
-					msgSend, err := icmp.ParseMessage(58, bodyData[40:48]) // iana.ProtocolIPv6ICMP
+					msgSend, err := icmp.ParseMessage(58, bodyData[40:]) // iana.ProtocolIPv6ICMP
 					if err != nil {
 						return
 					}
@@ -354,6 +376,7 @@ func v6dispatcher(ctx context.Context, data chan *icmpReceived, icmpResponse cha
 					if sendBody, ok := msgSend.Body.(*icmp.Echo); ok {
 						r.ID = sendBody.ID
 						r.Seq = sendBody.Seq
+						r.Data = sendBody.Data
 						icmpResponse <- r
 					}
 				} else {
@@ -464,6 +487,7 @@ func (mgr *ICMPManager) Issue(ip net.Addr, ttl int, timeout time.Duration, lengt
 		Seq:      int(count),
 		ID:       id,
 		TargetIP: dest,
+		Data:     data,
 		delivery: delivery,
 	}, timeout)
 

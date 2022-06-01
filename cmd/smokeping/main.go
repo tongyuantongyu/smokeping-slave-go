@@ -288,6 +288,8 @@ func Once(c *master.Config) {
 
 		//print(b.String())
 
+		//print(b.String())
+
 		err := Send(b.String()[:b.Len()-1])
 		defer func() {
 			if err != nil {

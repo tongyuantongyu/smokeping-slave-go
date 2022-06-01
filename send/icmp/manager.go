@@ -37,6 +37,7 @@ type Request interface {
 type Response interface {
 	GetIdentifier() (int, net.IP)
 	GetInformation() (net.IP, fasttime.Time, int)
+	GetVerifier() any
 }
 
 // Concurrent map implementation by orcaman(https://github.com/orcaman)
