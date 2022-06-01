@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"smokeping-slave-go/fasttime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,19 +26,19 @@ type ICMPRequest struct {
 	// target ip of the request, extend identify field
 	TargetIP net.IP
 	// return timeout Result if Deadline passed.
-	Deadline time.Time
+	Deadline fasttime.Time
 	// request issue time
-	IssueTime time.Time
+	IssueTime fasttime.Time
 	// channel to return result
 	delivery chan *Result
 }
 
 func (r *ICMPRequest) SetTimeout(duration time.Duration) {
-	r.IssueTime = time.Now()
+	r.IssueTime = fasttime.Now()
 	r.Deadline = r.IssueTime.Add(duration)
 }
 
-func (r *ICMPRequest) Passed(time time.Time) bool {
+func (r *ICMPRequest) Passed(time fasttime.Time) bool {
 	return r.Deadline.Before(time)
 }
 
@@ -82,7 +83,7 @@ type ICMPResponse struct {
 	// response source ip
 	AddrIP net.IP
 	// time passed from request time
-	Received time.Time
+	Received fasttime.Time
 	// target ip of the request
 	TargetIP net.IP
 	// Code of ICMP destination unreachable message response
@@ -93,7 +94,7 @@ func (I *ICMPResponse) GetIdentifier() (int, net.IP) {
 	return I.ID, I.TargetIP
 }
 
-func (I *ICMPResponse) GetInformation() (net.IP, time.Time, int) {
+func (I *ICMPResponse) GetInformation() (net.IP, fasttime.Time, int) {
 	return I.AddrIP, I.Received, I.Code
 }
 
@@ -102,7 +103,7 @@ type RawResponse struct {
 	// response source ip
 	AddrIP net.IP
 	// time passed from request time
-	Received time.Time
+	Received fasttime.Time
 	// target ip of the request
 	TargetIP net.IP
 	// Code of ICMP destination unreachable message response
@@ -145,8 +146,18 @@ var once sync.Once
 
 type icmpReceived struct {
 	addr net.Addr
-	curr time.Time
 	data []byte
+	curr fasttime.Time
+}
+
+const mtu = 1500
+
+type recvBuffer [mtu]byte
+
+var bufPool = sync.Pool{
+	New: func() any {
+		return new(recvBuffer)
+	},
 }
 
 func receiver(ctx context.Context, conn *icmp.PacketConn, data chan *icmpReceived) {
@@ -157,10 +168,12 @@ func receiver(ctx context.Context, conn *icmp.PacketConn, data chan *icmpReceive
 		default:
 		}
 
-		buf := make([]byte, 1500)
+		bufArray := bufPool.Get().(*recvBuffer)
+		buf := bufArray[:mtu]
 		n, sAddr, connErr := conn.ReadFrom(buf)
-		curr := time.Now()
+		curr := fasttime.Now()
 		if connErr != nil || sAddr == nil || n == 0 {
+			bufPool.Put(bufArray)
 			continue
 		}
 
@@ -171,6 +184,7 @@ func receiver(ctx context.Context, conn *icmp.PacketConn, data chan *icmpReceive
 			curr: curr,
 		}:
 		default:
+			bufPool.Put(bufArray)
 			log.Printf("Can't keep up! Dropping packet from %s\n", sAddr.String())
 		}
 	}
@@ -183,82 +197,86 @@ func v4dispatcher(ctx context.Context, data chan *icmpReceived, icmpResponse cha
 		case <-ctx.Done():
 			return
 		case resp := <-data:
-			var ip net.IP
-			if _a, ok := resp.addr.(*net.IPAddr); ok {
-				ip = _a.IP
-			} else {
-				continue
-			}
-			r := &ICMPResponse{
-				Received: resp.curr,
-				AddrIP:   ip,
-				Code:     257,
-			}
-			// read the body received
-			msg, err := icmp.ParseMessage(1, resp.data) // iana.ProtocolICMP
-			if err != nil {
-				log.Printf("Failed parsing ICMP message: %s\n", err)
-				continue
-			}
-			var bodyData []byte
-			switch body := msg.Body.(type) {
-			// this message is EchoReply. Read identification info straightly.
-			case *icmp.Echo:
-				r.TargetIP = r.AddrIP
-				r.ID = body.ID
-				r.Seq = body.Seq
-				icmpResponse <- r
-				continue
-			case *icmp.TimeExceeded:
-				if msg.Code != 0 {
-					continue
-				} // We don't care Code 1: Fragment reassembly time exceeded.
-				r.Code = 258
-				bodyData = body.Data
-				// let code below process
-			case *icmp.DstUnreach:
-				r.Code = msg.Code
-				bodyData = body.Data
-				// let code below process
-			// this message may not be icmpReceived of our request.
-			default:
-				continue
-			}
-			// Recover identification from response body which contains request header.
-			// ICMP type 11 Data Structure, From IANA:
-			// Data contains Source IP Header and First 8 bytes of payload
-			// 20 bytes (In our case) IP Header of source message
-			// 8 bytes  Head of Payload msg (full Echo msg in our case)
-			if len(bodyData) < 28 {
-				continue
-			}
-			head, err := ipv4.ParseHeader(bodyData[:20])
-			if err != nil {
-				continue
-			}
-			r.TargetIP = head.Dst.To16()
-			if head.Protocol == 1 { // iana.ProtocolICMP
-				msgSend, err := icmp.ParseMessage(1, bodyData[20:28]) // iana.ProtocolICMP
+			func() {
+				defer bufPool.Put((*recvBuffer)(resp.data[:mtu:mtu]))
+
+				var ip net.IP
+				if _a, ok := resp.addr.(*net.IPAddr); ok {
+					ip = _a.IP
+				} else {
+					return
+				}
+				r := &ICMPResponse{
+					Received: resp.curr,
+					AddrIP:   ip,
+					Code:     257,
+				}
+				// read the body received
+				msg, err := icmp.ParseMessage(1, resp.data) // iana.ProtocolICMP
 				if err != nil {
-					continue
+					log.Printf("Failed parsing ICMP message: %s\n", err)
+					return
 				}
-				// discard ICMP but not Echo message. That can't be response of our packets
-				if sendBody, ok := msgSend.Body.(*icmp.Echo); ok {
-					r.ID = sendBody.ID
-					r.Seq = sendBody.Seq
+				var bodyData []byte
+				switch body := msg.Body.(type) {
+				// this message is EchoReply. Read identification info straightly.
+				case *icmp.Echo:
+					r.TargetIP = r.AddrIP
+					r.ID = body.ID
+					r.Seq = body.Seq
 					icmpResponse <- r
+					return
+				case *icmp.TimeExceeded:
+					if msg.Code != 0 {
+						return
+					} // We don't care Code 1: Fragment reassembly time exceeded.
+					r.Code = 258
+					bodyData = body.Data
+					// let code below process
+				case *icmp.DstUnreach:
+					r.Code = msg.Code
+					bodyData = body.Data
+					// let code below process
+				// this message may not be icmpReceived of our request.
+				default:
+					return
 				}
-			} else {
-				// request not ICMP Protocol. Let rawResponse dispatcher process it.
-				rawResponse <- &RawResponse{
-					AddrIP:   r.AddrIP,
-					Received: r.Received,
-					TargetIP: r.TargetIP,
-					Protocol: head.Protocol,
-					Code:     r.Code,
-					Fragment: bodyData[20:],
+				// Recover identification from response body which contains request header.
+				// ICMP type 11 Data Structure, From IANA:
+				// Data contains Source IP Header and First 8 bytes of payload
+				// 20 bytes (In our case) IP Header of source message
+				// 8 bytes  Head of Payload msg (full Echo msg in our case)
+				if len(bodyData) < 28 {
+					return
 				}
-			}
+				head, err := ipv4.ParseHeader(bodyData[:20])
+				if err != nil {
+					return
+				}
+				r.TargetIP = head.Dst.To16()
+				if head.Protocol == 1 { // iana.ProtocolICMP
+					msgSend, err := icmp.ParseMessage(1, bodyData[20:28]) // iana.ProtocolICMP
+					if err != nil {
+						return
+					}
+					// discard ICMP but not Echo message. That can't be response of our packets
+					if sendBody, ok := msgSend.Body.(*icmp.Echo); ok {
+						r.ID = sendBody.ID
+						r.Seq = sendBody.Seq
+						icmpResponse <- r
+					}
+				} else {
+					// request not ICMP Protocol. Let rawResponse dispatcher process it.
+					rawResponse <- &RawResponse{
+						AddrIP:   r.AddrIP,
+						Received: r.Received,
+						TargetIP: r.TargetIP,
+						Protocol: head.Protocol,
+						Code:     r.Code,
+						Fragment: bodyData[20:],
+					}
+				}
+			}()
 		}
 	}
 }
@@ -270,82 +288,86 @@ func v6dispatcher(ctx context.Context, data chan *icmpReceived, icmpResponse cha
 		case <-ctx.Done():
 			return
 		case resp := <-data:
-			var ip net.IP
-			if _a, ok := resp.addr.(*net.IPAddr); ok {
-				ip = _a.IP
-			} else {
-				continue
-			}
-			r := &ICMPResponse{
-				Received: resp.curr,
-				AddrIP:   ip,
-				Code:     257,
-			}
-			// read the body received
-			msg, err := icmp.ParseMessage(58, resp.data) // iana.ProtocolIPv6ICMP
-			if err != nil {
-				log.Printf("Failed parsing ICMPv6 message: %s\n", err)
-				continue
-			}
-			var bodyData []byte
-			switch body := msg.Body.(type) {
-			// this message is EchoReply. Read identification info straightly.
-			case *icmp.Echo:
-				r.TargetIP = r.AddrIP
-				r.ID = body.ID
-				r.Seq = body.Seq
-				icmpResponse <- r
-				continue
-			case *icmp.TimeExceeded:
-				if msg.Code != 0 {
-					continue
-				} // We don't care Code 1: Fragment reassembly time exceeded.
-				r.Code = 258
-				bodyData = body.Data
-				// let code below process
-			case *icmp.DstUnreach:
-				r.Code = msg.Code
-				bodyData = body.Data
-				// let code below process
-			// this message may not be icmpReceived of our request.
-			default:
-				continue
-			}
-			// Recover identification from response body which contains request header.
-			// ICMPv6 type 3 Data Part Structure, From IANA:
-			// Data contains Source IP Header and First 8 bytes of payload
-			// 40 bytes (In our case) IPv6 Header of source message
-			// 8 bytes  Head of Payload msg (full Echo msg in our case)
-			if len(bodyData) < 48 {
-				continue
-			}
-			head, err := ipv6.ParseHeader(bodyData[:40])
-			if err != nil {
-				continue
-			}
-			r.TargetIP = head.Dst.To16()
-			if head.NextHeader == 58 { // iana.ProtocolIPv6ICMP
-				msgSend, err := icmp.ParseMessage(58, bodyData[40:48]) // iana.ProtocolIPv6ICMP
+			func() {
+				defer bufPool.Put((*recvBuffer)(resp.data[:mtu:mtu]))
+
+				var ip net.IP
+				if _a, ok := resp.addr.(*net.IPAddr); ok {
+					ip = _a.IP
+				} else {
+					return
+				}
+				r := &ICMPResponse{
+					Received: resp.curr,
+					AddrIP:   ip,
+					Code:     257,
+				}
+				// read the body received
+				msg, err := icmp.ParseMessage(58, resp.data) // iana.ProtocolIPv6ICMP
 				if err != nil {
-					continue
+					log.Printf("Failed parsing ICMPv6 message: %s\n", err)
+					return
 				}
-				// discard ICMPv6 but not Echo message. That can't be response of our packets
-				if sendBody, ok := msgSend.Body.(*icmp.Echo); ok {
-					r.ID = sendBody.ID
-					r.Seq = sendBody.Seq
+				var bodyData []byte
+				switch body := msg.Body.(type) {
+				// this message is EchoReply. Read identification info straightly.
+				case *icmp.Echo:
+					r.TargetIP = r.AddrIP
+					r.ID = body.ID
+					r.Seq = body.Seq
 					icmpResponse <- r
+					return
+				case *icmp.TimeExceeded:
+					if msg.Code != 0 {
+						return
+					} // We don't care Code 1: Fragment reassembly time exceeded.
+					r.Code = 258
+					bodyData = body.Data
+					// let code below process
+				case *icmp.DstUnreach:
+					r.Code = msg.Code
+					bodyData = body.Data
+					// let code below process
+				// this message may not be icmpReceived of our request.
+				default:
+					return
 				}
-			} else {
-				// request not ICMPv6 Protocol. Let rawResponse icmpDispatcher process it.
-				rawResponse <- &RawResponse{
-					AddrIP:   r.AddrIP,
-					Received: r.Received,
-					TargetIP: r.TargetIP,
-					Protocol: head.NextHeader,
-					Code:     r.Code,
-					Fragment: bodyData[40:],
+				// Recover identification from response body which contains request header.
+				// ICMPv6 type 3 Data Part Structure, From IANA:
+				// Data contains Source IP Header and First 8 bytes of payload
+				// 40 bytes (In our case) IPv6 Header of source message
+				// 8 bytes  Head of Payload msg (full Echo msg in our case)
+				if len(bodyData) < 48 {
+					return
 				}
-			}
+				head, err := ipv6.ParseHeader(bodyData[:40])
+				if err != nil {
+					return
+				}
+				r.TargetIP = head.Dst.To16()
+				if head.NextHeader == 58 { // iana.ProtocolIPv6ICMP
+					msgSend, err := icmp.ParseMessage(58, bodyData[40:48]) // iana.ProtocolIPv6ICMP
+					if err != nil {
+						return
+					}
+					// discard ICMPv6 but not Echo message. That can't be response of our packets
+					if sendBody, ok := msgSend.Body.(*icmp.Echo); ok {
+						r.ID = sendBody.ID
+						r.Seq = sendBody.Seq
+						icmpResponse <- r
+					}
+				} else {
+					// request not ICMPv6 Protocol. Let rawResponse icmpDispatcher process it.
+					rawResponse <- &RawResponse{
+						AddrIP:   r.AddrIP,
+						Received: r.Received,
+						TargetIP: r.TargetIP,
+						Protocol: head.NextHeader,
+						Code:     r.Code,
+						Fragment: bodyData[40:],
+					}
+				}
+			}()
 		}
 	}
 }
@@ -357,7 +379,7 @@ func GetICMPManager() *ICMPManager {
 	once.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		manager = &ICMPManager{
-			queue:   NewCMap(64),
+			queue:   NewCMap(4),
 			counter: 0,
 			ctx:     ctx,
 			cancel:  cancel,
@@ -468,9 +490,10 @@ func (mgr *ICMPManager) Issue(ip net.Addr, ttl int, timeout time.Duration, lengt
 
 // icmpDispatcher send Result back to their caller
 func (mgr *ICMPManager) icmpDispatcher(v4, v6 chan *ICMPResponse) {
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	var last fasttime.Time
 	for {
-		now := time.Now()
+		now := fasttime.Now()
 		var response *ICMPResponse
 		select {
 		case response = <-v4:
@@ -486,6 +509,11 @@ func (mgr *ICMPManager) icmpDispatcher(v4, v6 chan *ICMPResponse) {
 			}
 		}
 
+		if now.Since(last) < 50*time.Millisecond {
+			continue
+		}
+
+		last = now
 		timeout := make([]int, 0)
 		for t := range mgr.queue.IterBuffered() {
 			if t.Val.Passed(now) {
@@ -520,7 +548,7 @@ func (mgr *ICMPManager) rawDispatcher(v4, v6 chan *RawResponse) {
 }
 
 func (mgr *ICMPManager) Flush() {
-	queue := NewCMap(64)
+	queue := NewCMap(4)
 	queue = (*ConMapRequest)(atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&mgr.queue)), unsafe.Pointer(queue)))
 	for t := range mgr.queue.IterBuffered() {
 		t.Val.Deliver(nil)

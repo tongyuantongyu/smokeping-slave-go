@@ -39,19 +39,25 @@ func Format(b *strings.Builder, dt []time.Duration, count uint64) string {
 	b.WriteString(strconv.FormatUint(count-uint64(countOk), 10))
 	b.WriteByte(':')
 
-	if countOk%1 == 0 {
-		writeDuration(b, valid[countOk/2])
-	} else {
-		writeDuration(b, (valid[countOk/2-1]+valid[countOk/2])/2)
+	writeDuration(b, valid[countOk/2])
+	//if countOk%1 == 0 {
+	//	writeDuration(b, valid[countOk/2])
+	//} else {
+	//	writeDuration(b, (valid[countOk/2-1]+valid[countOk/2])/2)
+	//}
+
+	lost := count - uint64(countOk)
+	for i := uint64(0); i < lost/2; i++ {
+		b.WriteString(":U")
 	}
 
-	for _, d := range dt {
+	for _, d := range valid {
 		b.WriteByte(':')
-		if d == -1 {
-			b.WriteByte('U')
-		} else {
-			writeDuration(b, d)
-		}
+		writeDuration(b, d)
+	}
+
+	for i := uint64(0); i < (lost+1)/2; i++ {
+		b.WriteString(":U")
 	}
 
 	return b.String()

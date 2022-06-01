@@ -286,6 +286,8 @@ func Once(c *master.Config) {
 			return
 		}
 
+		//print(b.String())
+
 		err := Send(b.String()[:b.Len()-1])
 		defer func() {
 			if err != nil {

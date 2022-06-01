@@ -21,7 +21,7 @@ t = [['linux', 'amd64'],
 
 for o, a in t:
     subprocess.run(
-        f'''SET GOOS={o}&&SET GOARCH={a}&&'''
+        f'''SET GOOS={o}&&SET GOARCH={a}&&SET GOMIPS=softfloat&&'''
         f'''go build -tags="jsoniter" -ldflags="-s -w '''
         f'''-X main.fullVersion={full_ver} -X \'main.buildDate={cur}\'" '''
         f'''-o smokeping-worker_{o}_{a}{".exe" if o == "windows" else ""} '''
@@ -29,7 +29,7 @@ for o, a in t:
     )
 
 subprocess.run(
-    f'''SET GOOS={o}&&SET GOARCH={a}&&'''
+    f'''SET GOOS={o}&&SET GOARCH={a}&&SET GOMIPS=softfloat&&'''
     f'''go build -tags="jsoniter" -ldflags="-s -w -H windowsgui '''
     f'''-X main.fullVersion={full_ver} -X \'main.buildDate={cur}\'" '''
     f'''-o smokeping-worker_windowsgui_amd64.exe '''

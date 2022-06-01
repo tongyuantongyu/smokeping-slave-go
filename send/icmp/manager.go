@@ -3,6 +3,7 @@ package icmp
 import (
 	"encoding/binary"
 	"net"
+	"smokeping-slave-go/fasttime"
 	"sync"
 	"time"
 )
@@ -29,13 +30,13 @@ type Manager interface {
 
 type Request interface {
 	SetTimeout(time.Duration)
-	Passed(time.Time) bool
+	Passed(fasttime.Time) bool
 	Deliver(Response) bool
 }
 
 type Response interface {
 	GetIdentifier() (int, net.IP)
-	GetInformation() (net.IP, time.Time, int)
+	GetInformation() (net.IP, fasttime.Time, int)
 }
 
 // Concurrent map implementation by orcaman(https://github.com/orcaman)
