@@ -17,6 +17,7 @@ import (
 	"os"
 	"smokeping-slave-go/calc"
 	"smokeping-slave-go/master"
+	"smokeping-slave-go/priority"
 	"smokeping-slave-go/send"
 	"strconv"
 	"sync"
@@ -34,7 +35,6 @@ var help = flag.BoolP("help", "h", false, "Print help")
 const url = "/smokeping.fcgi"
 
 var cli *http.Client
-var working uint32
 
 var fullVersion string
 var buildDate string
@@ -165,7 +165,9 @@ func sendOnce(data []byte) (err error) {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad http response: %s", resp.Status)
 	}
@@ -371,6 +373,10 @@ func main() {
 	data := make(chan sendData, *buffer)
 
 	bootstrap()
+
+	if err := priority.Elevate(); err != nil {
+		log.Printf("Failed to improve process priority: %s.", err)
+	}
 
 	go sender(data)
 	work(data)

@@ -26,20 +26,21 @@ func ping(c *master.ProbeConfig, t *master.Target, v6 bool) (r []time.Duration) 
 
 	var ticker *time.Ticker
 	if c.MinInterval > 0 {
-		ticker = time.NewTicker(c.MinInterval)
+		ticker = time.NewTicker(c.MinInterval / 2)
 	}
 
 	r = make([]time.Duration, 0, c.Pings)
 	for i := uint64(0); i < c.Pings; i++ {
-		if ticker != nil {
-			<-ticker.C
-		}
-
 		result := <-m.Issue(addr, 100, c.Timeout, int(c.PacketSize))
 		if result.Code == 257 {
 			r = append(r, result.Latency)
 		} else {
 			r = append(r, time.Duration(-1))
+		}
+
+		if ticker != nil {
+			<-ticker.C
+			<-ticker.C
 		}
 	}
 

@@ -12,7 +12,7 @@ func writeDuration(b *bytes.Buffer, d time.Duration) {
 	b.WriteString(strconv.FormatFloat(f, 'e', 10, 64))
 }
 
-func Format(b *bytes.Buffer, dt []time.Duration, count uint64) string {
+func Format(b *bytes.Buffer, dt []time.Duration, count uint64) {
 	b.WriteString("U:")
 
 	var valid []time.Duration
@@ -29,7 +29,7 @@ func Format(b *bytes.Buffer, dt []time.Duration, count uint64) string {
 			b.WriteString(":U")
 		}
 
-		return b.String()
+		return
 	}
 
 	sort.Slice(valid, func(i, j int) bool {
@@ -59,6 +59,4 @@ func Format(b *bytes.Buffer, dt []time.Duration, count uint64) string {
 	for i := uint64(0); i < (lost+1)/2; i++ {
 		b.WriteString(":U")
 	}
-
-	return b.String()
 }
