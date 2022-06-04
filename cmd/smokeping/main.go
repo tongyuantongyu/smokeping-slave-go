@@ -11,11 +11,14 @@ import (
 	flag "github.com/spf13/pflag"
 	"io"
 	"log"
+	"math/rand"
 	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"smokeping-slave-go/calc"
+	"smokeping-slave-go/gcnotifier"
 	"smokeping-slave-go/master"
 	"smokeping-slave-go/priority"
 	"smokeping-slave-go/send"
@@ -277,7 +280,7 @@ func Once(c *master.Config, deliver chan sendData) {
 		ticker := time.NewTicker(c.Step / time.Duration(len(targets)))
 		waiter := sync.WaitGroup{}
 		waiter.Add(len(targets))
-		for _, target := range targets {
+		for _, idx := range rand.Perm(len(targets)) {
 			go func(t master.Target) {
 				step := send(pc, &t)
 				agg <- result{
@@ -286,7 +289,7 @@ func Once(c *master.Config, deliver chan sendData) {
 					id:    t.Identifier,
 				}
 				waiter.Done()
-			}(target)
+			}(targets[idx])
 
 			<-ticker.C
 		}
@@ -307,8 +310,8 @@ func Once(c *master.Config, deliver chan sendData) {
 		close(agg)
 	}()
 
-	now := strconv.FormatInt(time.Now().Unix(), 10)
-	log.Printf("Start a new round of probing at %s.\n", now)
+	log.Println("Start a new round of probing.")
+	now := strconv.FormatInt(time.Now().Add(c.Step).Unix(), 10)
 
 	data := dataCache.Get().([]result)
 	if cap(data) < c.T.Count {
@@ -344,7 +347,7 @@ func bootstrap() {
 	ticker := time.NewTicker(*retry)
 	defer ticker.Stop()
 	for ; true; <-ticker.C {
-		if err := sendOnce([]byte("")); err == nil {
+		if err := sendOnce(nil); err == nil {
 			return
 		}
 	}
@@ -372,11 +375,19 @@ func main() {
 	}
 	data := make(chan sendData, *buffer)
 
+	go func() {
+		for range gcnotifier.New().AfterGC() {
+			log.Printf("GC.")
+		}
+	}()
+
 	bootstrap()
 
 	if err := priority.Elevate(); err != nil {
 		log.Printf("Failed to improve process priority: %s.", err)
 	}
+
+	runtime.GC()
 
 	go sender(data)
 	work(data)

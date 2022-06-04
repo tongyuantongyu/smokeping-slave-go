@@ -3,7 +3,6 @@ package icmp
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -415,12 +414,12 @@ func GetICMPManager() *ICMPManager {
 		raw6 := make(chan *RawResponse, 1024)
 		conn4, err := icmp.ListenPacket("ip4:icmp", "")
 		if err != nil {
-			panic(fmt.Sprintf("Can't listen to ICMP: %s", err))
+			log.Fatalf("Can't listen to ICMP: %s\n", err)
 		}
 		manager.pConn4 = conn4
 		conn6, err := icmp.ListenPacket("ip6:ipv6-icmp", "")
 		if err != nil {
-			panic(fmt.Sprintf("Can't listen to ICMPv6: %s", err))
+			log.Fatalf("Can't listen to ICMPv6: %s\n", err)
 		}
 		manager.pConn6 = conn6
 		go v4dispatcher(ctx, resp4, result4, raw4)
