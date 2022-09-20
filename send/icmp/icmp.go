@@ -16,6 +16,8 @@ import (
 	"unsafe"
 )
 
+var Debug bool
+
 // An ICMPRequest represents an ICMPRequest issued by ping or trace for listener
 // to get corresponding Result
 type ICMPRequest struct {
@@ -64,15 +66,28 @@ func (r *ICMPRequest) Deliver(response Response) bool {
 				l = len(r.Data)
 			}
 			if !bytes.Equal(r.Data[:l], data[:l]) {
+				log.Printf("Message body mismatch from %s, id %d, seq %d. Collision or message tampered?\n",
+					TargetIP.String(), ID, r.Seq)
 				return false
 			}
 		}
 
 		AddrIP, Received, Code := response.GetInformation()
+		if Debug {
+			if Code == 257 {
+				log.Printf("[DEBUG] In %9.4fms, Echo->%39s@%d, 257<-@%d\n", float64(Received.Since(r.IssueTime))/float64(time.Millisecond),
+					r.TargetIP, r.IssueTime, Received)
+			} else {
+				log.Printf("[DEBUG] In %9.4fms, Echo->%39s@%d, %3d<-%s@%d\n", float64(Received.Since(r.IssueTime))/float64(time.Millisecond),
+					r.TargetIP, r.IssueTime, Code, AddrIP, Received)
+			}
+
+		}
 		if r.Passed(Received) {
 			r.delivery <- &Result{
 				Code: 256,
 			}
+			log.Printf("Late arrived response from %s: overdue %s.\n", AddrIP, Received.Sub(r.Deadline))
 		} else {
 			r.delivery <- &Result{
 				AddrIP:  AddrIP,
@@ -157,6 +172,9 @@ type ICMPManager struct {
 	lc4    sync.Mutex
 	pConn6 *icmp.PacketConn
 	lc6    sync.Mutex
+
+	sent     uint32
+	received uint32
 }
 
 var manager *ICMPManager
@@ -193,6 +211,10 @@ func receiver(ctx context.Context, conn *icmp.PacketConn, data chan *icmpReceive
 		if connErr != nil || sAddr == nil || n == 0 {
 			bufPool.Put(bufArray)
 			continue
+		}
+
+		if Debug {
+			atomic.AddUint32(&manager.received, 1)
 		}
 
 		select {
@@ -433,6 +455,16 @@ func GetICMPManager() *ICMPManager {
 		<-manager.Issue(addr, 100, time.Second, 0)
 		addr, _ = net.ResolveIPAddr("", "::1")
 		<-manager.Issue(addr, 100, time.Second, 0)
+
+		if Debug {
+			go func() {
+				for range time.Tick(time.Minute) {
+					sent := atomic.SwapUint32(&manager.sent, 0)
+					recv := atomic.SwapUint32(&manager.received, 0)
+					log.Printf("[DEBUG] Sent %d ICMP packets, received %d ICMP packets for last minute.\n", sent, recv)
+				}
+			}()
+		}
 	})
 	return manager
 }
@@ -508,6 +540,9 @@ func (mgr *ICMPManager) Issue(ip net.Addr, ttl int, timeout time.Duration, lengt
 		mgr.lc6.Unlock()
 	}
 
+	if Debug {
+		atomic.AddUint32(&manager.sent, 1)
+	}
 	return
 }
 
@@ -540,8 +575,14 @@ func (mgr *ICMPManager) icmpDispatcher(v4, v6 chan *ICMPResponse) {
 		timeout := make([]int, 0)
 		for t := range mgr.queue.IterBuffered() {
 			if t.Val.Passed(now) {
-				timeout = append(timeout, t.Key)
 				t.Val.Deliver(nil)
+				if Debug {
+					if t.Val.Passed(now.Add(-time.Minute)) {
+						timeout = append(timeout, t.Key)
+					}
+				} else {
+					timeout = append(timeout, t.Key)
+				}
 			}
 		}
 		for _, key := range timeout {

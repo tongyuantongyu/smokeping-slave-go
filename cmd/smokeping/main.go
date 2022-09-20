@@ -22,6 +22,7 @@ import (
 	"smokeping-slave-go/master"
 	"smokeping-slave-go/priority"
 	"smokeping-slave-go/send"
+	"smokeping-slave-go/send/icmp"
 	"strconv"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ var retry = flag.DurationP("retry", "r", 10*time.Second, "Retry interval when re
 var logTo = flag.StringSliceP("log", "l", []string{"-"}, "Log target")
 var buffer = flag.IntP("buffer", "b", 1440, "Metric buffer size count")
 var help = flag.BoolP("help", "h", false, "Print help")
+var debug = flag.Bool("debug", false, "Enable debug message")
 
 const url = "/smokeping.fcgi"
 
@@ -44,7 +46,7 @@ var buildDate string
 
 func init() {
 	if fullVersion != "" && buildDate != "" {
-		fmt.Printf("Go Smokeping worker %s build at %s\n", fullVersion, buildDate)
+		log.Printf("Go Smokeping worker %s build at %s\n", fullVersion, buildDate)
 	} else {
 		log.Println("Go Smokeping worker non-release build. Not for production.")
 	}
@@ -54,6 +56,11 @@ func init() {
 	if *help {
 		flag.PrintDefaults()
 		os.Exit(0)
+	}
+
+	if *debug {
+		icmp.Debug = true
+		send.TCPDebug = true
 	}
 
 	cli = &http.Client{
@@ -75,7 +82,7 @@ func init() {
 	var w []io.Writer
 	for _, target := range *logTo {
 		if target == "-" {
-			w = append(w, os.Stderr)
+			w = append(w, os.Stdout)
 		} else {
 			f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.ModePerm)
 			if err != nil {
@@ -115,6 +122,10 @@ func sendOnce(data []byte) (err error) {
 			log.Printf("Failed during communication: %s.\n", err)
 		}
 	}()
+
+	if *debug && len(data) > 0 {
+		log.Printf("Sending data:\n%s\n---------------------------------\n", string(data))
+	}
 
 	hash := hmac.New(md5.New, []byte(*key))
 	hash.Write(data)

@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"smokeping-slave-go/fasttime"
 	"smokeping-slave-go/master"
 	"strings"
 	"syscall"
 	"time"
 )
+
+var TCPDebug bool
 
 func tcping(c *master.ProbeConfig, t *master.Target, v6 bool) (r []time.Duration) {
 	var ntwk string
@@ -28,13 +31,13 @@ func tcping(c *master.ProbeConfig, t *master.Target, v6 bool) (r []time.Duration
 		host = fmt.Sprintf("%s:%d", t.Host, t.Port)
 	}
 
-	var start time.Time
+	var start fasttime.Time
 	var ctx context.Context
 	var cancel context.CancelFunc
 	var timer *time.Timer
 	d := net.Dialer{
 		Control: func(string, string, syscall.RawConn) error {
-			start = time.Now()
+			start = fasttime.Now()
 			timer = time.AfterFunc(c.Timeout, cancel)
 			return nil
 		},
@@ -62,7 +65,12 @@ func tcping(c *master.ProbeConfig, t *master.Target, v6 bool) (r []time.Duration
 				}
 			}
 		} else {
-			r = append(r, time.Since(start))
+			now := fasttime.Now()
+			r = append(r, now.Since(start))
+			if TCPDebug {
+				log.Printf("[DEBUG] In %9.4fms, TSYN->%39s@%d, <-@%d\n", float64(now.Since(start))/float64(time.Millisecond),
+					host, start, now)
+			}
 		}
 		if timer != nil {
 			timer.Stop()
