@@ -2,4 +2,5 @@
 _*
 **/_*
 exec/*/config.toml
+release
 *.exe

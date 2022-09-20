@@ -18,7 +18,6 @@ import (
 	"os"
 	"runtime"
 	"smokeping-slave-go/calc"
-	"smokeping-slave-go/gcnotifier"
 	"smokeping-slave-go/master"
 	"smokeping-slave-go/priority"
 	"smokeping-slave-go/send"
@@ -385,12 +384,6 @@ func main() {
 		log.Fatalf("buffer size must > 0, got %d\n", *buffer)
 	}
 	data := make(chan sendData, *buffer)
-
-	go func() {
-		for range gcnotifier.New().AfterGC() {
-			log.Printf("GC.")
-		}
-	}()
 
 	bootstrap()
 
