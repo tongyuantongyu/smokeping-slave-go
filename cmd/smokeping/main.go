@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"smokeping-slave-go/bind"
 	"smokeping-slave-go/calc"
 	"smokeping-slave-go/master"
 	"smokeping-slave-go/priority"
@@ -36,6 +37,7 @@ var buffer = flag.IntP("buffer", "b", 1440, "Metric buffer size count")
 var help = flag.BoolP("help", "h", false, "Print help")
 var debug = flag.Bool("debug", false, "Enable debug message")
 var scramble = flag.Bool("scramble", false, "Scramble ICMP id and seq")
+var iface = flag.StringSlice("interface", nil, "Interface or ip(s) bind to")
 
 const url = "/smokeping.fcgi"
 
@@ -65,6 +67,10 @@ func init() {
 
 	if *scramble {
 		send.Scramble = true
+	}
+
+	if err := bind.Parse(*iface); err != nil {
+		log.Fatalf("Can not parse interface: %s.", err)
 	}
 
 	cli = &http.Client{

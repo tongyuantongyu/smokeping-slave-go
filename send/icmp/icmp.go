@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"smokeping-slave-go/bind"
 	"smokeping-slave-go/fasttime"
 	"sync"
 	"sync/atomic"
@@ -463,12 +464,12 @@ func GetICMPManager() *ICMPManager {
 		result6 := make(chan *ICMPResponse, 1024)
 		raw4 := make(chan *RawResponse, 1024)
 		raw6 := make(chan *RawResponse, 1024)
-		conn4, err := icmp.ListenPacket("ip4:icmp", "")
+		conn4, err := icmp.ListenPacket("ip4:icmp", bind.LAddr4().String())
 		if err != nil {
 			log.Fatalf("Can't listen to ICMP: %s\n", err)
 		}
 		manager.pConn4 = conn4
-		conn6, err := icmp.ListenPacket("ip6:ipv6-icmp", "")
+		conn6, err := icmp.ListenPacket("ip6:ipv6-icmp", bind.LAddr6().String())
 		if err != nil {
 			log.Fatalf("Can't listen to ICMPv6: %s\n", err)
 		}

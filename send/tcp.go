@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"smokeping-slave-go/bind"
 	"smokeping-slave-go/fasttime"
 	"smokeping-slave-go/master"
 	"strings"
@@ -42,6 +43,12 @@ func tcping(c *master.ProbeConfig, t *master.Target, v6 bool) (r []time.Duration
 			return nil
 		},
 		FallbackDelay: -1,
+	}
+
+	if ntwk == "tcp6" {
+		d.LocalAddr = bind.LAddr6().AsTCP()
+	} else if ntwk == "tcp4" {
+		d.LocalAddr = bind.LAddr4().AsTCP()
 	}
 
 	var ticker *time.Ticker

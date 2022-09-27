@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	flag "github.com/spf13/pflag"
+	"log"
 	"math/rand"
 	"net"
 	"os"
+	"smokeping-slave-go/bind"
 	"smokeping-slave-go/priority"
 	"smokeping-slave-go/send/icmp"
 	"time"
@@ -22,6 +24,7 @@ var help = flag.BoolP("help", "h", false, "Print help")
 var prio = flag.BoolP("priority", "p", false, "Use highest priority")
 var debug = flag.BoolP("debug", "d", false, "Enable icmp debug")
 var scramble = flag.Bool("scramble", false, "Scramble ICMP id and seq")
+var iface = flag.StringSlice("interface", nil, "Interface or ip(s) bind to")
 
 func main() {
 	flag.Parse()
@@ -45,6 +48,10 @@ func main() {
 
 	if *debug {
 		icmp.Debug = true
+	}
+
+	if err := bind.Parse(*iface); err != nil {
+		log.Fatalf("Can not parse interface: %s.", err)
 	}
 
 	target = flag.Arg(0)
