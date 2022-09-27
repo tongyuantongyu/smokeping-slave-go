@@ -34,17 +34,18 @@ func ping(c *master.ProbeConfig, t *master.Target, v6 bool) (r []time.Duration) 
 		ticker = time.NewTicker(c.MinInterval / 2)
 	}
 
+	id := int(atomic.AddUint32(&id, 1) & 0xffff)
+
 	r = make([]time.Duration, 0, c.Pings)
 	for i := uint64(0); i < c.Pings; i++ {
-		payload := icmp.ICMPPayload{ID: -1, Seq: -1}
+		payload := icmp.ICMPPayload{ID: id, Seq: int(i)}
 		if c.PacketSize > 8 {
 			payload.Data = make([]byte, c.PacketSize-8)
 			rand.Read(payload.Data)
 		}
-
-		if !Scramble {
-			payload.ID = int(atomic.AddUint32(&id, 1) & 0xffff)
-			payload.Seq = int(i)
+		if Scramble {
+			payload.ID = -1
+			payload.Seq = -1
 		}
 		result := <-m.Issue(addr, 100, c.Timeout, payload)
 		if result.Code == 257 {

@@ -75,15 +75,17 @@ func main() {
 	m := icmp.GetICMPManager()
 	time.Sleep(300 * time.Millisecond)
 
+	id := rand.Intn(1 << 16)
+
 	for i := uint64(0); i < *count; i++ {
-		payload := icmp.ICMPPayload{ID: -1, Seq: -1}
+		payload := icmp.ICMPPayload{ID: id, Seq: int(i)}
 		if *size > 8 {
 			payload.Data = make([]byte, *size-8)
 			rand.Read(payload.Data)
 		}
-		if !*scramble {
-			payload.ID = rand.Intn(1 << 16)
-			payload.Seq = int(i)
+		if *scramble {
+			payload.ID = -1
+			payload.Seq = -1
 		}
 		result := <-m.Issue(addr, int(*ttl), *timeout, payload)
 		latency := float64(result.Latency) / float64(time.Millisecond)
