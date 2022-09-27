@@ -35,6 +35,7 @@ var logTo = flag.StringSliceP("log", "l", []string{"-"}, "Log target")
 var buffer = flag.IntP("buffer", "b", 1440, "Metric buffer size count")
 var help = flag.BoolP("help", "h", false, "Print help")
 var debug = flag.Bool("debug", false, "Enable debug message")
+var scramble = flag.Bool("scramble", false, "Scramble ICMP id and seq")
 
 const url = "/smokeping.fcgi"
 
@@ -60,6 +61,10 @@ func init() {
 	if *debug {
 		icmp.Debug = true
 		send.TCPDebug = true
+	}
+
+	if *scramble {
+		send.Scramble = true
 	}
 
 	cli = &http.Client{

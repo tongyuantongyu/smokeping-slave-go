@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	flag "github.com/spf13/pflag"
+	"math/rand"
 	"net"
 	"os"
 	"smokeping-slave-go/priority"
@@ -19,6 +20,8 @@ var timeout = flag.DurationP("timeout", "w", 3*time.Second, "Ping timeout")
 var ttl = flag.Uint8P("ttl", "t", 100, "TTL")
 var help = flag.BoolP("help", "h", false, "Print help")
 var prio = flag.BoolP("priority", "p", false, "Use highest priority")
+var debug = flag.BoolP("debug", "d", false, "Enable icmp debug")
+var scramble = flag.Bool("scramble", false, "Scramble ICMP id and seq")
 
 func main() {
 	flag.Parse()
@@ -38,6 +41,10 @@ func main() {
 		if err := priority.Elevate(); err != nil {
 			fmt.Printf("Failed to improve process priority: %s", err)
 		}
+	}
+
+	if *debug {
+		icmp.Debug = true
 	}
 
 	target = flag.Arg(0)
@@ -62,7 +69,16 @@ func main() {
 	time.Sleep(300 * time.Millisecond)
 
 	for i := uint64(0); i < *count; i++ {
-		result := <-m.Issue(addr, int(*ttl), *timeout, int(*size))
+		payload := icmp.ICMPPayload{ID: -1, Seq: -1}
+		if *size > 8 {
+			payload.Data = make([]byte, *size-8)
+			rand.Read(payload.Data)
+		}
+		if !*scramble {
+			payload.ID = rand.Intn(1 << 16)
+			payload.Seq = int(i)
+		}
+		result := <-m.Issue(addr, int(*ttl), *timeout, payload)
 		latency := float64(result.Latency) / float64(time.Millisecond)
 		switch result.Code {
 		case 256:
