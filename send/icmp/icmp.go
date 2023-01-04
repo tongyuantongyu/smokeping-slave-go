@@ -93,7 +93,9 @@ func (r *ICMPRequest) Deliver(response Response) bool {
 			r.delivery <- &Result{
 				Code: 256,
 			}
-			log.Printf("Late arrived response from %s: overdue %s.\n", addrIP, received.Sub(r.Deadline))
+			if Debug {
+				log.Printf("Late arrived response from %s: overdue %s.\n", addrIP, received.Sub(r.Deadline))
+			}
 		} else {
 			r.delivery <- &Result{
 				AddrIP:  addrIP,
@@ -155,7 +157,7 @@ type ICMPManager struct {
 	// queue stores the pending requests seq and their response channel.
 	// once it gots ICMPResponse it will send them back to the request owner.
 	// we don't use native map to ensure thread safety
-	//queue map[int]*ICMPRequest
+	// queue map[int]*ICMPRequest
 	queue *ConMapRequest
 	// extListener stores external ICMP TimeExceed/DstUnreachable listeners
 	// which send other Protocol message(e.g. TCP, UDP) but expect ICMP reply

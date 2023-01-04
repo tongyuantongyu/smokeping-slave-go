@@ -31,13 +31,14 @@ import (
 var node = flag.StringP("node", "n", "test", "Node name")
 var key = flag.StringP("key", "k", "", "Node key")
 var server = flag.StringP("server", "s", "http://localhost", "Server address")
-var retry = flag.DurationP("retry", "r", 10*time.Second, "Retry interval when request failed")
+var timeout = flag.DurationP("timeout", "t", 30*time.Second, "Retry interval when request failed")
 var logTo = flag.StringSliceP("log", "l", []string{"-"}, "Log target")
 var buffer = flag.IntP("buffer", "b", 1440, "Metric buffer size count")
 var help = flag.BoolP("help", "h", false, "Print help")
 var debug = flag.Bool("debug", false, "Enable debug message")
 var scramble = flag.Bool("scramble", false, "Scramble ICMP id and seq")
 var iface = flag.StringSlice("interface", nil, "Interface or ip(s) bind to")
+var version = flag.Bool("version", false, "Print version")
 
 const url = "/smokeping.fcgi"
 
@@ -47,6 +48,11 @@ var fullVersion string
 var buildDate string
 
 func init() {
+	if *version {
+		fmt.Println(fullVersion)
+		os.Exit(0)
+	}
+
 	if fullVersion != "" && buildDate != "" {
 		log.Printf("Go Smokeping worker %s build at %s\n", fullVersion, buildDate)
 	} else {
@@ -77,13 +83,13 @@ func init() {
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
-				Timeout:   *retry / 2,
+				Timeout:   *timeout,
 				KeepAlive: 10 * time.Second,
 			}).DialContext,
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          3,
 			IdleConnTimeout:       time.Hour,
-			TLSHandshakeTimeout:   *retry / 2,
+			TLSHandshakeTimeout:   *timeout,
 			ExpectContinueTimeout: 1 * time.Second,
 			DisableCompression:    true,
 		},
@@ -126,6 +132,15 @@ var bodyBuffer bytes.Buffer
 
 func sendOnce(data []byte) (err error) {
 	bodyBuffer.Reset()
+
+	// if len(data) != 0 {
+	//	time.Sleep(10 * time.Second)
+	//	if rand.Intn(25) != 0 {
+	//		return errors.New("rand")
+	//	}
+	//
+	//	return
+	// }
 
 	defer func() {
 		if err != nil {
@@ -175,7 +190,7 @@ func sendOnce(data []byte) (err error) {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *retry/2)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", *server+url, &bodyBuffer)
 	if err != nil {
@@ -254,7 +269,12 @@ type sendData struct {
 	data []result
 }
 
-func formatResult(r sendData, b *bytes.Buffer) []byte {
+type pendingData struct {
+	at   string
+	data []byte
+}
+
+func formatResult(r *sendData, b *bytes.Buffer) []byte {
 	b.Reset()
 	for _, entry := range r.data {
 		b.WriteString(entry.id)
@@ -274,26 +294,131 @@ var dataCache = sync.Pool{
 	},
 }
 
-func sender(data chan sendData) {
+func backoutSleep(scaler int) {
+	time.Sleep(time.Duration(scaler+rand.Intn(scaler)) * time.Millisecond)
+}
+
+func sender(data chan *sendData) {
 	var b bytes.Buffer
 	for v := range data {
 		payload := formatResult(v, &b)
 		dataCache.Put(v.data[:0])
 		err := sendOnce(payload)
 		if err != nil {
-			ticker := time.NewTicker(*retry)
-			for range ticker.C {
+			for {
+				backoutSleep(5000)
 				if err = sendOnce(payload); err == nil {
 					break
 				}
 			}
-			ticker.Stop()
 		}
 		log.Printf("Metric at %s sent to server.\n", v.at)
 	}
 }
 
-func Once(c *master.Config, deliver chan sendData) {
+func drainSend[T any](c chan T, v T) {
+	if cap(c) == 0 {
+		panic("Can't drain send on unbuffered channel")
+	}
+	for {
+		select {
+		case c <- v:
+			return
+		default:
+			select {
+			case <-c:
+			default:
+			}
+		}
+	}
+}
+
+func senderInf(data chan *sendData) {
+	var b bytes.Buffer
+	back := make(chan *pendingData)
+	drain := make(chan *pendingData)
+	state := make(chan bool, 1)
+	go backoutBuffer(back, drain)
+	go backoutSender(drain, back, state)
+
+	for v := range data {
+		payload := formatResult(v, &b)
+		dataCache.Put(v.data[:0])
+		var err error
+		for i := 0; i < 3; i++ {
+			if err = sendOnce(payload); err == nil {
+				log.Printf("Metric at %s sent to server.\n", v.at)
+				drainSend(state, true)
+				break
+			}
+			backoutSleep(2500)
+		}
+		if err != nil {
+			drainSend(state, false)
+			log.Printf("Failed sending metric at %s to server: %s. Put into retry queue.\n", v.at, err)
+			back <- &pendingData{at: v.at, data: payload}
+		}
+	}
+}
+
+func backoutBuffer(data, drain chan *pendingData) {
+	var buffer []*pendingData
+	var current *pendingData
+	var stored bool
+	for {
+		if len(buffer) == 0 {
+			current = <-data
+			stored = false
+		} else {
+			current = buffer[len(buffer)-1]
+			stored = true
+		}
+
+		select {
+		case v := <-data:
+			if !stored {
+				buffer = append(buffer, current)
+			}
+
+			current = v
+		case drain <- current:
+			if stored {
+				if len(buffer) == 1 {
+					// GC the buffer, as all stuffs are gone
+					buffer = nil
+				} else {
+					buffer = buffer[:len(buffer)-1]
+				}
+			}
+		}
+	}
+}
+
+func backoutSender(data, resched chan *pendingData, state chan bool) {
+	current := false
+	for {
+		if !current {
+			current = <-state
+			continue
+		}
+
+		select {
+		case current = <-state:
+			continue
+		case v := <-data:
+			if err := sendOnce(v.data); err == nil {
+				log.Printf("Metric at %s sent to server.\n", v.at)
+				backoutSleep(2500)
+			} else {
+				log.Printf("Failed sending metric at %s to server: %s. Put into retry queue (rescheduled).\n", v.at, err)
+				current = false
+				resched <- v
+			}
+		}
+	}
+}
+
+func Once(c *master.Config, deliver chan *sendData) {
 	agg := make(chan result)
 	sendDone := sync.WaitGroup{}
 
@@ -331,8 +456,8 @@ func Once(c *master.Config, deliver chan sendData) {
 		close(agg)
 	}()
 
-	log.Println("Start a new round of probing.")
 	now := strconv.FormatInt(time.Now().Add(c.Step).Unix(), 10)
+	log.Printf("Start probing of round %s.\n", now)
 
 	data := dataCache.Get().([]result)
 	if cap(data) < c.T.Count {
@@ -343,38 +468,48 @@ func Once(c *master.Config, deliver chan sendData) {
 		data = append(data, r)
 	}
 
-	if len(data) != 0 {
-	Deliver:
-		for {
-			select {
-			case deliver <- sendData{
-				data: data,
-				at:   now,
-			}:
-				break Deliver
+	log.Printf("Finished probing of round %s.\n", now)
 
+	if len(data) == 0 {
+		return
+	}
+	if *buffer <= 0 {
+		deliver <- &sendData{
+			data: data,
+			at:   now,
+		}
+		return
+	}
+
+	for i := 0; i < 10; i++ {
+		select {
+		case deliver <- &sendData{
+			data: data,
+			at:   now,
+		}:
+			return
+
+		default:
+			select {
+			case old := <-deliver:
+				log.Printf("Buffer full. Dropping old data at %s in favor of new data\n", old.at)
 			default:
-				select {
-				case <-deliver:
-				default:
-				}
 			}
 		}
-
 	}
+
 }
 
 func bootstrap() {
-	ticker := time.NewTicker(*retry)
-	defer ticker.Stop()
-	for ; true; <-ticker.C {
+	for {
 		if err := sendOnce(nil); err == nil {
 			return
 		}
+		backoutSleep(5000)
 	}
 }
 
-func work(deliver chan sendData) {
+func work(deliver chan *sendData) {
 	c := getConfig()
 	ticker := time.NewTicker(c.Step)
 	stamp := c.Last
@@ -391,19 +526,21 @@ func work(deliver chan sendData) {
 }
 
 func main() {
-	if *buffer <= 0 {
-		log.Fatalf("buffer size must > 0, got %d\n", *buffer)
-	}
-	data := make(chan sendData, *buffer)
-
-	bootstrap()
-
 	if err := priority.Elevate(); err != nil {
 		log.Printf("Failed to improve process priority: %s.", err)
 	}
 
+	bootstrap()
 	runtime.GC()
 
-	go sender(data)
-	work(data)
+	if *buffer > 0 {
+		data := make(chan *sendData, *buffer)
+		go sender(data)
+		work(data)
+	} else {
+		data := make(chan *sendData)
+		go senderInf(data)
+		work(data)
+	}
+
 }
