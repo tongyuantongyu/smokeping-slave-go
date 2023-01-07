@@ -48,6 +48,7 @@ var fullVersion string
 var buildDate string
 
 func init() {
+	flag.Parse()
 	if *version {
 		fmt.Println(fullVersion)
 		os.Exit(0)
@@ -58,8 +59,6 @@ func init() {
 	} else {
 		log.Println("Go Smokeping worker non-release build. Not for production.")
 	}
-
-	flag.Parse()
 
 	if *help {
 		flag.PrintDefaults()
