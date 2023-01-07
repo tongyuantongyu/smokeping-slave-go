@@ -31,7 +31,7 @@ import (
 var node = flag.StringP("node", "n", "test", "Node name")
 var key = flag.StringP("key", "k", "", "Node key")
 var server = flag.StringP("server", "s", "http://localhost", "Server address")
-var timeout = flag.DurationP("timeout", "t", 30*time.Second, "Retry interval when request failed")
+var timeout = flag.DurationP("timeout", "t", 30*time.Second, "Timeout when communicating with server")
 var logTo = flag.StringSliceP("log", "l", []string{"-"}, "Log target")
 var buffer = flag.IntP("buffer", "b", 1440, "Metric buffer size count")
 var help = flag.BoolP("help", "h", false, "Print help")
