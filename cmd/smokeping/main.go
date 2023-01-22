@@ -141,12 +141,6 @@ func sendOnce(data []byte) (err error) {
 	//	return
 	// }
 
-	defer func() {
-		if err != nil {
-			log.Printf("Failed during communication: %s.\n", err)
-		}
-	}()
-
 	if *debug && len(data) > 0 {
 		log.Printf("Sending data:\n%s\n---------------------------------\n", string(data))
 	}
@@ -242,7 +236,7 @@ func sendOnce(data []byte) (err error) {
 
 	newConfig, err := master.ParseConfig(bodyBuffer.Bytes(), *node)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed parsing master config: %w", err)
 	}
 
 	if config.Last < newConfig.Last {
@@ -302,14 +296,13 @@ func sender(data chan *sendData) {
 	for v := range data {
 		payload := formatResult(v, &b)
 		dataCache.Put(v.data[:0])
-		err := sendOnce(payload)
-		if err != nil {
-			for {
-				backoutSleep(5000)
-				if err = sendOnce(payload); err == nil {
-					break
-				}
+		for {
+			err := sendOnce(payload)
+			if err == nil {
+				break
 			}
+			log.Printf("Failed sending data to server: %s.\n", err)
+			backoutSleep(5000)
 		}
 		log.Printf("Metric at %s sent to server.\n", v.at)
 	}
