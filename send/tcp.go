@@ -17,6 +17,19 @@ var TCPDebug bool
 
 func tcping(c *master.ProbeConfig, t *master.Target, v6 bool) (r []time.Duration) {
 	var ntwk string
+	var v6wrap bool
+
+	if strings.Contains(t.Host, ":") {
+		if !v6 {
+			v6 = true
+			log.Printf("Auto corrected %s to use tcpping6.\n", t.Host)
+		}
+
+		if !strings.HasPrefix(t.Host, "[") {
+			v6wrap = true
+		}
+	}
+
 	if v6 {
 		ntwk = "tcp6"
 	} else {
@@ -24,10 +37,8 @@ func tcping(c *master.ProbeConfig, t *master.Target, v6 bool) (r []time.Duration
 	}
 
 	var host string
-	if strings.Contains(t.Host, ":") && t.Host[0] != '[' {
-		ntwk = "tcp6"
+	if v6wrap {
 		host = fmt.Sprintf("[%s]:%d", t.Host, t.Port)
-		log.Printf("Auto corrected %s to use tcpping6.", host)
 	} else {
 		host = fmt.Sprintf("%s:%d", t.Host, t.Port)
 	}
